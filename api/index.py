@@ -7,253 +7,161 @@ import os
 import traceback
 from pathlib import Path
 
-# Print to stderr so it shows up in Vercel logs
-def log_error(msg):
-    try:
-        print(f"ERROR: {msg}", file=sys.stderr, flush=True)
-    except:
-        pass
-
-def log_info(msg):
-    try:
-        print(f"INFO: {msg}", file=sys.stderr, flush=True)
-    except:
-        pass
-
-# Initialize handler to None - will be set below
-# CRITICAL: handler must be defined at module level for Vercel
-handler = None
-app = None
-
-# Create a minimal fallback handler first (in case everything fails)
-def create_fallback_handler():
-    """Create a minimal fallback handler that always works"""
-    try:
-        from fastapi import FastAPI
-        from mangum import Mangum
-        fallback = FastAPI()
-        
-        @fallback.get("/")
-        async def root():
-            return {
-                "error": "Backend initialization failed",
-                "message": "Check Vercel function logs for details",
-                "status": "fallback_mode"
-            }
-        
-        return Mangum(fallback, lifespan="off")
-    except Exception as e:
-        # If even this fails, we're in serious trouble
-        # Return None and let the error handler below deal with it
-        return None
-
-# Set initial fallback handler
+# CRITICAL: Define handler at module level immediately
+# This ensures Vercel always has a handler, even if imports fail
 try:
-    handler = create_fallback_handler()
-except:
-    pass
-
-# Wrap everything in try-except to catch initialization errors
-try:
-    log_info("=== Starting API initialization ===")
+    from fastapi import FastAPI
+    from mangum import Mangum
     
-    # Determine paths first (before any imports that might fail)
+    # Create minimal app first
+    minimal_app = FastAPI()
+    
+    @minimal_app.get("/")
+    async def root():
+        return {
+            "status": "initializing",
+            "message": "Backend is loading..."
+        }
+    
+    handler = Mangum(minimal_app, lifespan="off")
+except Exception as e:
+    # If even basic imports fail, we're in trouble
+    # Print error and create absolute minimal handler
+    print(f"CRITICAL: Failed to create minimal handler: {e}", file=sys.stderr, flush=True)
+    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    handler = None
+
+# Now try to load the real backend
+if handler is not None:
     try:
+        print("INFO: Starting backend initialization...", file=sys.stderr, flush=True)
+        
+        # Get paths
         current_file = Path(__file__).resolve()
         api_dir = current_file.parent
         project_root = api_dir.parent
         backend_dir = project_root / "backend"
-        
-        log_info(f"Current file: {current_file}")
-        log_info(f"API dir: {api_dir}")
-        log_info(f"Project root: {project_root}")
-        log_info(f"Backend dir: {backend_dir}")
-        log_info(f"Backend dir exists: {backend_dir.exists()}")
-    except Exception as e:
-        log_error(f"Path resolution failed: {e}")
-        raise
-    
-    # Add paths to sys.path before importing
-    try:
-        backend_path_str = str(backend_dir)
-        project_root_str = str(project_root)
-        if backend_path_str not in sys.path:
-            sys.path.insert(0, backend_path_str)
-        if project_root_str not in sys.path:
-            sys.path.insert(0, project_root_str)
-        
-        log_info(f"Python path (first 3): {sys.path[:3]}")
-    except Exception as e:
-        log_error(f"Path setup failed: {e}")
-        raise
-    
-    # Now try to import server
-    import_error = None
-    
-    try:
-        log_info("Attempting to import server module...")
-        # Use importlib first for more reliable path resolution
-        import importlib.util
         server_file = backend_dir / "server.py"
         
-        log_info(f"Server file path: {server_file}")
-        log_info(f"Server file exists: {server_file.exists()}")
+        print(f"INFO: Current file: {current_file}", file=sys.stderr, flush=True)
+        print(f"INFO: Backend dir: {backend_dir}", file=sys.stderr, flush=True)
+        print(f"INFO: Server file exists: {server_file.exists()}", file=sys.stderr, flush=True)
         
-        if not server_file.exists():
-            raise FileNotFoundError(f"server.py not found at {server_file}")
+        # Add to path
+        if str(backend_dir) not in sys.path:
+            sys.path.insert(0, str(backend_dir))
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
         
-        spec = importlib.util.spec_from_file_location("server", server_file)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Failed to create spec from {server_file}")
+        # Try to import server
+        app = None
+        import_error = None
         
-        log_info("Loading server module via importlib...")
-        server_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(server_module)
-        app = server_module.app
-        log_info("✅ Successfully loaded server module via importlib")
+        if server_file.exists():
+            try:
+                print("INFO: Attempting to load server.py...", file=sys.stderr, flush=True)
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("server", server_file)
+                if spec and spec.loader:
+                    server_module = importlib.util.module_from_spec(spec)
+                    # Wrap exec_module to catch any errors during module execution
+                    try:
+                        spec.loader.exec_module(server_module)
+                        print("INFO: Module executed successfully", file=sys.stderr, flush=True)
+                    except Exception as exec_error:
+                        print(f"ERROR: Error executing server module: {exec_error}", file=sys.stderr, flush=True)
+                        print(traceback.format_exc(), file=sys.stderr, flush=True)
+                        raise exec_error
+                    
+                    # Try to get app attribute
+                    if hasattr(server_module, 'app'):
+                        app = server_module.app
+                        print("INFO: ✅ Successfully loaded server module and got app", file=sys.stderr, flush=True)
+                    else:
+                        raise AttributeError("server module has no 'app' attribute")
+                else:
+                    raise ImportError("Failed to create module spec")
+            except Exception as e:
+                print(f"ERROR: Failed to load via importlib: {e}", file=sys.stderr, flush=True)
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+                import_error = str(e)
+                
+                # Try direct import
+                try:
+                    print("INFO: Trying direct import...", file=sys.stderr, flush=True)
+                    from server import app
+                    print("INFO: ✅ Direct import succeeded", file=sys.stderr, flush=True)
+                    import_error = None
+                except Exception as e2:
+                    print(f"ERROR: Direct import also failed: {e2}", file=sys.stderr, flush=True)
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
+                    import_error = f"{str(e)} | {str(e2)}"
+        else:
+            import_error = f"server.py not found at {server_file}"
+            print(f"ERROR: {import_error}", file=sys.stderr, flush=True)
         
-    except Exception as e:
-        log_error(f"❌ Import failed: {e}")
-        log_error(traceback.format_exc())
-        import_error = str(e)
-        
-        # Try fallback direct import
-        try:
-            log_info("Trying fallback direct import...")
-            from server import app
-            log_info("✅ Fallback direct import succeeded")
-            import_error = None
-        except Exception as e2:
-            log_error(f"❌ Fallback import also failed: {e2}")
-            log_error(traceback.format_exc())
-            import_error = f"Primary: {str(e)}, Fallback: {str(e2)}"
-    
-    # If import failed, create a minimal error app
-    if app is None:
-        log_error("⚠️ Creating fallback error app")
-        try:
-            from fastapi import FastAPI
-            app = FastAPI()
+        # If we got the app, create new handler
+        if app is not None:
+            try:
+                print("INFO: Creating Mangum handler with real app...", file=sys.stderr, flush=True)
+                from mangum import Mangum
+                handler = Mangum(app, lifespan="off")
+                print("INFO: ✅ Handler created successfully", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"ERROR: Failed to create handler: {e}", file=sys.stderr, flush=True)
+                print(traceback.format_exc(), file=sys.stderr, flush=True)
+        else:
+            # Create error app
+            print("WARN: App is None, creating error app", file=sys.stderr, flush=True)
+            error_app = FastAPI()
             
-            @app.get("/")
-            async def root():
+            @error_app.get("/")
+            async def error_root():
                 return {
-                    "error": "Failed to import backend server",
-                    "message": import_error or "Unknown import error",
+                    "error": "Failed to load backend",
+                    "import_error": import_error,
                     "backend_path": str(backend_dir),
-                    "backend_exists": backend_dir.exists(),
-                    "current_file": str(current_file),
-                    "api_dir": str(api_dir),
-                    "project_root": str(project_root),
-                    "python_path": sys.path[:5]
+                    "server_exists": server_file.exists() if server_file else False
                 }
             
-            @app.get("/test-db")
-            async def test_db():
+            @error_app.get("/api/")
+            async def api_root():
                 return {
-                    "error": "Backend server not loaded",
+                    "error": "Failed to load backend",
                     "import_error": import_error
                 }
             
-            log_info("✅ Fallback error app created")
-        except Exception as e:
-            log_error(f"Failed to create fallback app: {e}")
-            log_error(traceback.format_exc())
-            raise
-    
-    # Create Mangum handler (replace fallback with real handler)
-    try:
-        log_info("Creating Mangum handler...")
-        from mangum import Mangum
-        if app is not None:
-            handler = Mangum(app, lifespan="off")
-            log_info("✅ Mangum handler created successfully with real app")
-        else:
-            log_error("⚠️ App is None, keeping fallback handler")
+            from mangum import Mangum
+            handler = Mangum(error_app, lifespan="off")
+            print("INFO: Created error app handler", file=sys.stderr, flush=True)
+            
     except Exception as e:
-        log_error(f"❌ Mangum initialization failed: {e}")
-        log_error(traceback.format_exc())
-        # If Mangum fails, create a minimal handler
+        print(f"ERROR: Critical error during initialization: {e}", file=sys.stderr, flush=True)
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        
+        # Create error handler
         try:
             from fastapi import FastAPI
             from mangum import Mangum
-            fallback_app = FastAPI()
+            error_app = FastAPI()
             
-            @fallback_app.get("/")
-            async def root():
+            @error_app.get("/")
+            async def critical_error():
                 return {
-                    "error": "Mangum initialization failed",
+                    "error": "Critical initialization error",
                     "message": str(e),
-                    "app_loaded": app is not None
+                    "type": type(e).__name__
                 }
             
-            handler = Mangum(fallback_app, lifespan="off")
-            log_info("✅ Created fallback Mangum handler")
-        except Exception as e2:
-            log_error(f"Failed to create fallback handler: {e2}")
-            log_error(traceback.format_exc())
-            raise
-    
-    log_info("=== API initialization complete ===")
-    
-except Exception as e:
-    # Ultimate fallback - if everything fails, create a minimal handler
-    log_error(f"🔥 CRITICAL ERROR during initialization: {e}")
-    log_error(traceback.format_exc())
-    
-    try:
-        from fastapi import FastAPI
-        from mangum import Mangum
-        
-        error_app = FastAPI()
-        
-        @error_app.get("/")
-        async def root():
-            return {
-                "error": "Critical initialization error",
-                "message": str(e),
-                "traceback": traceback.format_exc()
-            }
-        
-        handler = Mangum(error_app, lifespan="off")
-        log_info("✅ Created critical error handler")
-    except Exception as e2:
-        log_error(f"🔥 Even critical error handler failed: {e2}")
-        # Last resort - create absolute minimal handler
-        # This should never fail unless FastAPI/Mangum aren't installed
-        try:
-            from fastapi import FastAPI
-            from mangum import Mangum
-            minimal_app = FastAPI()
-            minimal_app.get("/")(lambda: {"error": "Handler initialization completely failed"})
-            handler = Mangum(minimal_app, lifespan="off")
+            handler = Mangum(error_app, lifespan="off")
         except:
-            # If this fails, Vercel will show the error
             pass
 
-# CRITICAL: Ensure handler is always defined
+# Final safety check
 if handler is None:
-    log_error("🔥 Handler is None! Creating emergency handler...")
-    try:
-        from fastapi import FastAPI
-        from mangum import Mangum
-        emergency_app = FastAPI()
-        
-        @emergency_app.get("/")
-        async def emergency():
-            return {
-                "error": "Handler was not initialized",
-                "check_logs": "See Vercel function logs for details"
-            }
-        
-        handler = Mangum(emergency_app, lifespan="off")
-        log_info("✅ Emergency handler created")
-    except Exception as e:
-        log_error(f"🔥 Emergency handler creation failed: {e}")
-        # This is the absolute last resort
-        # Vercel will show an error if handler doesn't exist
-        raise RuntimeError(f"Failed to create handler: {e}")
+    print("CRITICAL: Handler is None! This should never happen.", file=sys.stderr, flush=True)
+    # Last resort - this will fail but at least we tried
+    raise RuntimeError("Failed to create handler")
 
-# Export handler for Vercel
-# Vercel looks for 'handler' variable at module level
+# Export for Vercel
 __all__ = ["handler"]
