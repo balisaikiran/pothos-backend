@@ -5,6 +5,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import sys
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
@@ -469,13 +470,38 @@ async def health_check():
 # Include the router in the main app
 app.include_router(api_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS configuration with defensive error handling
+try:
+    cors_origins_str = os.environ.get('CORS_ORIGINS', '*')
+    # Handle empty string or None
+    if cors_origins_str and cors_origins_str.strip():
+        cors_origins = [origin.strip() for origin in cors_origins_str.split(',') if origin.strip()]
+    else:
+        cors_origins = ['*']
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+except Exception as e:
+    # If CORS setup fails, log but don't crash - use default CORS
+    logger.warning(f"Failed to configure CORS middleware: {e}. Using default CORS settings.")
+    print(f"CORS warning: {e}", file=sys.stderr, flush=True)
+    # Add basic CORS middleware as fallback
+    try:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_credentials=True,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    except Exception as e2:
+        logger.error(f"Failed to add fallback CORS middleware: {e2}")
+        # Continue without CORS - better than crashing
 
 # Add global exception handler to catch all errors
 @app.exception_handler(StarletteHTTPException)
