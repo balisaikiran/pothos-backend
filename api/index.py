@@ -21,8 +21,37 @@ def log_info(msg):
         pass
 
 # Initialize handler to None - will be set below
+# CRITICAL: handler must be defined at module level for Vercel
 handler = None
 app = None
+
+# Create a minimal fallback handler first (in case everything fails)
+def create_fallback_handler():
+    """Create a minimal fallback handler that always works"""
+    try:
+        from fastapi import FastAPI
+        from mangum import Mangum
+        fallback = FastAPI()
+        
+        @fallback.get("/")
+        async def root():
+            return {
+                "error": "Backend initialization failed",
+                "message": "Check Vercel function logs for details",
+                "status": "fallback_mode"
+            }
+        
+        return Mangum(fallback, lifespan="off")
+    except Exception as e:
+        # If even this fails, we're in serious trouble
+        # Return None and let the error handler below deal with it
+        return None
+
+# Set initial fallback handler
+try:
+    handler = create_fallback_handler()
+except:
+    pass
 
 # Wrap everything in try-except to catch initialization errors
 try:
@@ -63,41 +92,41 @@ try:
     
     try:
         log_info("Attempting to import server module...")
-        # Try direct import first
-        from server import app
-        log_info("✅ Successfully imported server module")
-    except ImportError as e:
-        log_error(f"❌ Direct import failed: {e}")
-        log_error(traceback.format_exc())
-        try:
-            # Try using importlib as fallback
-            import importlib.util
-            server_file = backend_dir / "server.py"
-            
-            log_info(f"Trying importlib fallback, server.py exists: {server_file.exists()}")
-            
-            if server_file.exists():
-                spec = importlib.util.spec_from_file_location("server", server_file)
-                if spec and spec.loader:
-                    log_info("Loading server module via importlib...")
-                    server_module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(server_module)
-                    app = server_module.app
-                    log_info("✅ Successfully loaded server module via importlib")
-                else:
-                    import_error = f"Failed to create spec from {server_file}"
-                    log_error(import_error)
-            else:
-                import_error = f"server.py not found at {server_file}"
-                log_error(import_error)
-        except Exception as e2:
-            import_error = f"Import error: {str(e)}, Fallback error: {str(e2)}"
-            log_error(import_error)
-            log_error(traceback.format_exc())
+        # Use importlib first for more reliable path resolution
+        import importlib.util
+        server_file = backend_dir / "server.py"
+        
+        log_info(f"Server file path: {server_file}")
+        log_info(f"Server file exists: {server_file.exists()}")
+        
+        if not server_file.exists():
+            raise FileNotFoundError(f"server.py not found at {server_file}")
+        
+        spec = importlib.util.spec_from_file_location("server", server_file)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to create spec from {server_file}")
+        
+        log_info("Loading server module via importlib...")
+        server_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(server_module)
+        app = server_module.app
+        log_info("✅ Successfully loaded server module via importlib")
+        
     except Exception as e:
-        import_error = f"Unexpected error during import: {str(e)}"
-        log_error(import_error)
+        log_error(f"❌ Import failed: {e}")
         log_error(traceback.format_exc())
+        import_error = str(e)
+        
+        # Try fallback direct import
+        try:
+            log_info("Trying fallback direct import...")
+            from server import app
+            log_info("✅ Fallback direct import succeeded")
+            import_error = None
+        except Exception as e2:
+            log_error(f"❌ Fallback import also failed: {e2}")
+            log_error(traceback.format_exc())
+            import_error = f"Primary: {str(e)}, Fallback: {str(e2)}"
     
     # If import failed, create a minimal error app
     if app is None:
@@ -132,12 +161,15 @@ try:
             log_error(traceback.format_exc())
             raise
     
-    # Create Mangum handler
+    # Create Mangum handler (replace fallback with real handler)
     try:
         log_info("Creating Mangum handler...")
         from mangum import Mangum
-        handler = Mangum(app, lifespan="off")
-        log_info("✅ Mangum handler created successfully")
+        if app is not None:
+            handler = Mangum(app, lifespan="off")
+            log_info("✅ Mangum handler created successfully with real app")
+        else:
+            log_error("⚠️ App is None, keeping fallback handler")
     except Exception as e:
         log_error(f"❌ Mangum initialization failed: {e}")
         log_error(traceback.format_exc())
