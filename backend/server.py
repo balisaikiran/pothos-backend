@@ -19,9 +19,15 @@ import traceback
 
 ROOT_DIR = Path(__file__).parent
 # Try to load .env file if it exists (for local development)
-env_file = ROOT_DIR / '.env'
-if env_file.exists():
-    load_dotenv(env_file)
+# Wrap in try-except to prevent failures during import
+try:
+    env_file = ROOT_DIR / '.env'
+    if env_file.exists():
+        load_dotenv(env_file)
+except Exception as e:
+    # If .env loading fails, continue without it
+    # Vercel uses environment variables directly, so this is fine
+    print(f"Note: Could not load .env file: {e}", file=sys.stderr, flush=True)
 # For Vercel, environment variables are already set
 
 # Configure logging first (needed for MongoDB connection logging)
