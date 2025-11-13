@@ -514,7 +514,6 @@ async def global_exception_handler(request, exc):
     )
 
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    if client:
-        client.close()
+# Note: In serverless environments like Vercel, shutdown events are not reliable
+# MongoDB connections are managed automatically by motor's connection pooling
+# No explicit shutdown handler needed - connections will be cleaned up when function ends
